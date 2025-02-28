@@ -6,9 +6,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	cmv1 "github.com/openshift-online/ocm-sdk-go/clustersmgmt/v1"
+	"github.com/openshift-online/ocm-sdk-go/logging"
 	"github.com/openshift/osd-network-verifier/pkg/data/cloud"
 	"github.com/openshift/osd-network-verifier/pkg/proxy"
 	onv "github.com/openshift/osd-network-verifier/pkg/verifier"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -425,4 +427,56 @@ func Test_egressVerification_GetAwsSubnetId(t *testing.T) {
 			}
 		})
 	}
+}
+
+func newTestLogger(t *testing.T) logging.Logger {
+	builder := logging.NewGoLoggerBuilder()
+	builder.Debug(true)
+	logger, err := builder.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return logger
+}
+
+// newTestCluster assembles a *cmv1.Cluster while handling the error to help out with inline test-case generation
+func newTestCluster(t *testing.T, cb *cmv1.ClusterBuilder) *cmv1.Cluster {
+	cluster, err := cb.Build()
+	if err != nil {
+		t.Fatalf("failed to build cluster: %s", err)
+	}
+
+	return cluster
+}
+
+// compareValidateEgressInput is a helper to compare selected fields of ValidateEgressInput that we care about during testing
+func compareValidateEgressInput(expected, actual *onv.ValidateEgressInput) bool {
+	if expected == nil && actual == nil {
+		return true
+	}
+
+	if (expected == nil && actual != nil) || (expected != nil && actual == nil) {
+		return false
+	}
+
+	if expected.SubnetID != actual.SubnetID ||
+		!reflect.DeepEqual(expected.AWS.SecurityGroupIDs, actual.AWS.SecurityGroupIDs) {
+		return false
+	}
+
+	if expected.AWS.KmsKeyID != actual.AWS.KmsKeyID {
+		return false
+	}
+
+	if expected.Proxy.HttpProxy != actual.Proxy.HttpProxy ||
+		expected.Proxy.HttpsProxy != actual.Proxy.HttpsProxy {
+		return false
+	}
+
+	if expected.Timeout != actual.Timeout {
+		return false
+	}
+
+	return true
 }
