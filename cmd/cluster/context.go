@@ -28,7 +28,6 @@ import (
 	"github.com/openshift/osdctl/pkg/utils"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 )
 
 const (
@@ -95,6 +94,11 @@ type contextData struct {
 
 	// OCM Cluster description
 	Description string
+
+	// User Banned Information
+	UserBanned     bool
+	BanCode        string
+	BanDescription string
 }
 
 // newCmdContext implements the context command to show the current context of a cluster
@@ -105,14 +109,17 @@ func newCmdContext() *cobra.Command {
 		Short:             "Shows the context of a specified cluster",
 		Args:              cobra.ExactArgs(1),
 		DisableAutoGenTag: true,
-		Run: func(cmd *cobra.Command, args []string) {
-			cmdutil.CheckErr(ops.complete(cmd, args))
-			cmdutil.CheckErr(ops.run())
+		RunE: func(cmd *cobra.Command, args []string) error {
+			err := ops.setup(args)
+			if err != nil {
+				return err
+			}
+
+			return ops.run()
 		},
 	}
 
 	contextCmd.Flags().StringVarP(&ops.output, "output", "o", "long", "Valid formats are ['long', 'short', 'json']. Output is set to 'long' by default")
-	contextCmd.Flags().StringVarP(&ops.clusterID, "cluster-id", "C", "", "Cluster ID")
 	contextCmd.Flags().StringVarP(&ops.awsProfile, "profile", "p", "", "AWS Profile")
 	contextCmd.Flags().BoolVarP(&ops.verbose, "verbose", "", false, "Verbose output")
 	contextCmd.Flags().BoolVar(&ops.full, "full", false, "Run full suite of checks.")
@@ -129,11 +136,7 @@ func newContextOptions() *contextOptions {
 	return &contextOptions{}
 }
 
-func (o *contextOptions) complete(cmd *cobra.Command, args []string) error {
-	if len(args) != 1 {
-		return cmdutil.UsageErrorf(cmd, "Provide exactly one cluster ID")
-	}
-
+func (o *contextOptions) setup(args []string) error {
 	if o.days < 1 {
 		return fmt.Errorf("cannot have a days value lower than 1")
 	}
@@ -241,6 +244,9 @@ func (o *contextOptions) printLongOutput(data *contextData) {
 
 	// Print Dynatrace URL
 	printDynatraceResources(data)
+
+	// Print User Banned Details
+	printUserBannedStatus(data)
 }
 
 func (o *contextOptions) printShortOutput(data *contextData) {
@@ -378,10 +384,26 @@ func (o *contextOptions) generateContextData() (*contextData, []error) {
 		}
 	}
 
+	GetBannedUser := func() {
+		defer wg.Done()
+		defer utils.StartDelayTracker(o.verbose, "Check Banned User").End()
+		subscription, err := utils.GetSubscription(ocmClient, data.ClusterID)
+		if err != nil {
+			errors = append(errors, fmt.Errorf("error while getting subscripton %v", err))
+		}
+		creator, err := utils.GetAccount(ocmClient, subscription.Creator().ID())
+		if err != nil {
+			errors = append(errors, fmt.Errorf("error while checking if user is banned %v", err))
+		}
+		data.UserBanned = creator.Banned()
+		data.BanCode = creator.BanCode()
+		data.BanDescription = creator.BanDescription()
+	}
+
 	GetJiraIssues := func() {
 		defer wg.Done()
 		defer utils.StartDelayTracker(o.verbose, "Jira Issues").End()
-		data.JiraIssues, err = utils.GetJiraIssuesForCluster(o.clusterID, o.externalClusterID)
+		data.JiraIssues, err = utils.GetJiraIssuesForCluster(o.clusterID, o.externalClusterID, o.jiratoken)
 		if err != nil {
 			errors = append(errors, fmt.Errorf("error while getting the open jira tickets: %v", err))
 		}
@@ -390,7 +412,7 @@ func (o *contextOptions) generateContextData() (*contextData, []error) {
 	GetSupportExceptions := func() {
 		defer wg.Done()
 		defer utils.StartDelayTracker(o.verbose, "Support Exceptions").End()
-		data.SupportExceptions, err = utils.GetJiraSupportExceptionsForOrg(o.organizationID)
+		data.SupportExceptions, err = utils.GetJiraSupportExceptionsForOrg(o.organizationID, o.jiratoken)
 		if err != nil {
 			errors = append(errors, fmt.Errorf("error while getting support exceptions: %v", err))
 		}
@@ -457,6 +479,7 @@ func (o *contextOptions) generateContextData() (*contextData, []error) {
 		GetSupportExceptions,
 		GetPagerDutyAlerts,
 		GetDynatraceDetails,
+		GetBannedUser,
 	)
 
 	if o.output == longOutputConfigValue {
@@ -731,6 +754,21 @@ func printDynatraceResources(data *contextData) {
 
 	if err := table.Flush(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error printing %s: %v\n", name, err)
+	}
+}
+
+func printUserBannedStatus(data *contextData) {
+	var name string = "User Ban Details"
+	fmt.Println("\n" + delimiter + name)
+	if data.UserBanned {
+		fmt.Println("User is banned")
+		fmt.Printf("Ban code = %v\n", data.BanCode)
+		fmt.Printf("Ban description = %v\n", data.BanDescription)
+		if data.BanCode == BanCodeExportControlCompliance {
+			fmt.Println("User banned due to export control compliance.\nPlease follow the steps detailed here: https://github.com/openshift/ops-sop/blob/master/v4/alerts/UpgradeConfigSyncFailureOver4HrSRE.md#user-banneddisabled-due-to-export-control-compliance .")
+		}
+	} else {
+		fmt.Println("User is not banned")
 	}
 }
 
